@@ -1,0 +1,3 @@
+truststore>=0.9
+requests>=2.31
+playwright>=1.40

@@ -1,0 +1,85 @@
+# ============================================================
+#  BMW Deal Scanner  —  Konfiguration
+# ============================================================
+# Du kannst hier BELIEBIGE Fahrzeuge suchen: einfach ein neues
+# Profil hinzufügen. Jedes Profil ist eine eigene Suche mit
+# eigenen Kriterien und eigenem Deal-Alarm.
+
+# Telegram-Geheimnisse stehen NICHT hier (Sicherheit!), sondern in
+# secrets.local.yaml (lokal, gitignored) bzw. in GitHub-Repo-Secrets (Env-Vars).
+# Reihenfolge: Env-Var > secrets.local.yaml > diese Datei.
+telegram:
+  bot_token: ""
+  chat_id: ""
+
+settings:
+  scan_interval_minutes: 30   # Abstand zwischen Scans im --loop Modus
+  max_listings: 250           # wie viele (günstigste) Inserate pro Profil je Scan geladen werden
+  quiet_first_run: true       # beim allerersten Scan eines Profils NICHT alles pushen, nur Bestand merken
+
+# ------------------------------------------------------------
+#  Such-Profile
+# ------------------------------------------------------------
+# Felder:
+#   price_min/max, year_min/max, mileage_max  -> harte Grenzen
+#   cubic_capacity_min: 2900   -> mind. ~3.0 Liter Hubraum
+#   horsepower_min            -> mind. PS
+#   fuel_types: [petrol]      -> petrol | diesel | electric | hybrid | gas
+#   autoscout24_models        -> Liste von {makeKey, modelKey} (AS24-Schlüssel)
+#   keywords_any              -> für textbasierte Quellen (tutti/ricardo/facebook)
+#   deal_threshold: 0.15      -> ab 15% unter Median = "guter Deal"
+
+profiles:
+  - name: "BMW 335i (E90/E91/E92/E93)"
+    enabled: true
+    sources: [autoscout24]
+    price_min: 0
+    price_max: 20000
+    year_min: 2006
+    year_max: 2014
+    mileage_max: 250000
+    cubic_capacity_min: 2900     # >= 3.0 L  (N54/N55 Reihensechser)
+    fuel_types: [petrol]
+    autoscout24_models:
+      - {makeKey: bmw, modelKey: "335"}
+    keywords_any: ["335i", "335xi", "335"]
+    deal_threshold: 0.15
+
+  - name: "BMW 330i (E90/E92, N52 3.0)"
+    enabled: true
+    sources: [autoscout24]
+    price_max: 20000
+    year_min: 2005
+    year_max: 2013
+    mileage_max: 250000
+    cubic_capacity_min: 2900
+    fuel_types: [petrol]
+    autoscout24_models:
+      - {makeKey: bmw, modelKey: "330"}
+    keywords_any: ["330i", "330xi", "330"]
+    deal_threshold: 0.15
+
+  - name: "BMW 130i / 135i (E81/E82/E87/E88)"
+    enabled: true
+    sources: [autoscout24]
+    price_max: 20000
+    year_min: 2005
+    year_max: 2014
+    mileage_max: 250000
+    cubic_capacity_min: 2900
+    fuel_types: [petrol]
+    autoscout24_models:
+      - {makeKey: bmw, modelKey: "130"}
+      - {makeKey: bmw, modelKey: "135"}
+    keywords_any: ["130i", "135i", "1er"]
+    deal_threshold: 0.15
+
+  # ---- Beispiel für ein späteres, ganz anderes Fahrzeug ----
+  # - name: "Audi S3 8V"
+  #   enabled: false
+  #   sources: [autoscout24]
+  #   price_max: 25000
+  #   year_min: 2013
+  #   autoscout24_models:
+  #     - {makeKey: audi, modelKey: "s3"}
+  #   keywords_any: ["S3"]

@@ -1,0 +1,16 @@
+name = "bmw-deal-scanner"
+main = "src/index.js"
+compatibility_date = "2026-05-01"
+
+# Scan-Takt: alle 30 Minuten
+[triggers]
+crons = ["*/30 * * * *"]
+
+# KV-Speicher für aktive Suchen, Dedup und Gesprächszustand.
+# id wird beim Setup von wrangler eingetragen.
+[[kv_namespaces]]
+binding = "BMW_KV"
+id = "aa47170e46da4c2abe4939d0420debe9"
+
+# Secrets (NICHT hier, via `wrangler secret put`):
+#   TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, WEBHOOK_SECRET

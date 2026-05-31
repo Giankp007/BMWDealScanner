@@ -1,0 +1,61 @@
+# Dependencies
+node_modules/
+**/node_modules/
+venv/
+.venv/
+env/
+ENV/
+__pycache__/
+*.pyc
+.gradle/
+# Build outputs
+dist/
+dist_electron/
+build/
+out/
+release/
+bin/
+obj/
+.cxx/
+# Binaries / installers (Code-Portfolio, keine Builds)
+*.apk
+*.aab
+*.exe
+*.msi
+*.dmg
+*.app
+*.lnk
+*.zip
+*.7z
+# Android
+local.properties
+captures/
+*.keystore
+*.jks
+# ML-Modelle / große Blobs
+*.task
+*.tflite
+*.onnx
+*.pt
+*.ckpt
+*.gguf
+*.bin
+*.model
+*.safetensors
+ffmpeg*.exe
+ffmpeg/
+# Secrets
+.env
+.env.*
+secrets.local.*
+secrets.json
+secrets.yaml
+keys.py
+credentials*.json
+*.token
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log

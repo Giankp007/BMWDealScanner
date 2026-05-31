@@ -1,0 +1,55 @@
+name: Browser Scan (ricardo)
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"     # alle 30 Min (User-Wunsch — schnellere DE-Alerts)
+  workflow_dispatch:
+
+concurrency:
+  group: browser-scan
+  cancel-in-progress: false
+
+permissions:
+  contents: write              # für das Zurück-Committen von seen_browser.json
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Cache Playwright-Browser
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium
+
+      - name: Install dependencies
+        run: |
+          pip install -r browser-scraper/requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run scraper
+        working-directory: browser-scraper
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WORKER_SECRET: ${{ secrets.WORKER_SECRET }}
+        run: python scrape.py
+
+      - name: Persist seen state
+        run: |
+          if [[ -n "$(git status --porcelain browser-scraper/seen_browser.json)" ]]; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add browser-scraper/seen_browser.json
+            git commit -m "chore: update browser seen [skip ci]"
+            git push
+          else
+            echo "seen_browser.json unverändert"
+          fi

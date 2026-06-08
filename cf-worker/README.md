@@ -6,13 +6,17 @@ Läuft 24/7 gratis, ohne eigenen Server. Quelle: AutoScout24.ch (interne JSON-AP
 **Live:** https://bmw-deal-scanner.giankp007.workers.dev
 
 ## Funktionen
-- Telegram-Befehle mit Menüs: `/addcar`, `/deletecar`, `/list`, `/deals`,
-  `/block`, `/blocklist`, `/help`
+- Telegram-Befehle mit Menüs: `/addcar`, `/kleinanzeigen`, `/mobile`, `/list`,
+  `/deletecar`, `/deals`, `/zeig`, `/ricardo`, `/favoriten`, `/block`,
+  `/blocklist`, `/scrape`, `/clear`, `/help`
 - Scan alle 30 Min (Cron) → Telegram-Alarm bei neuen Treffern
-- Deal-Bewertung vs. Markt-Median (🔥/👍/🆕)
+- Deal-Bewertung vs. Markt-Median (🔥 ≥25 % / 👍 ≥15 % / 🆕 neu)
 - Stichwort-Filter: Inserate mit gesperrten Wörtern (z. B. „Motorschaden") im
   Titel werden ausgeblendet
-- Dedup über KV → kein Spam
+- ⭐ Favoriten, Dedup über KV → kein Spam
+- Browser-Quellen (ricardo/kleinanzeigen/mobile) laufen separat über den
+  GitHub-Actions-Scraper in [`../browser-scraper/`](../browser-scraper/) und
+  holen sich die aktiven Suchen via `/searches?key=<WEBHOOK_SECRET>`.
 
 ## Aufbau
 ```

@@ -270,7 +270,7 @@ export const COMMANDS = [
 
 // GitHub-Repo, in dem der Browser-Scraper-Workflow liegt.
 const GH_OWNER = "Giankp007";
-const GH_REPO = "BmwFinder";
+const GH_REPO = "BMWDealScanner";
 const GH_WORKFLOW = "browser-scan.yml";
 // Cooldown zwischen manuellen /scrape-Triggern (GitHub limitiert sonst eh).
 const SCRAPE_COOLDOWN_MS = 90_000;

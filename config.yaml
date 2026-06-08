@@ -29,57 +29,22 @@ settings:
 #   keywords_any              -> für textbasierte Quellen (tutti/ricardo/facebook)
 #   deal_threshold: 0.15      -> ab 15% unter Median = "guter Deal"
 
-profiles:
-  - name: "BMW 335i (E90/E91/E92/E93)"
-    enabled: true
-    sources: [autoscout24]
-    price_min: 0
-    price_max: 20000
-    year_min: 2006
-    year_max: 2014
-    mileage_max: 250000
-    cubic_capacity_min: 2900     # >= 3.0 L  (N54/N55 Reihensechser)
-    fuel_types: [petrol]
-    autoscout24_models:
-      - {makeKey: bmw, modelKey: "335"}
-    keywords_any: ["335i", "335xi", "335"]
-    deal_threshold: 0.15
+# Standardmäßig KEINE Profile — du wählst selbst, wonach gesucht wird.
+# Am einfachsten über den Telegram-Bot (/addcar, alles per Knopfdruck),
+# oder trage hier eigene Profile nach dem Beispiel unten ein.
+profiles: []
 
-  - name: "BMW 330i (E90/E92, N52 3.0)"
-    enabled: true
-    sources: [autoscout24]
-    price_max: 20000
-    year_min: 2005
-    year_max: 2013
-    mileage_max: 250000
-    cubic_capacity_min: 2900
-    fuel_types: [petrol]
-    autoscout24_models:
-      - {makeKey: bmw, modelKey: "330"}
-    keywords_any: ["330i", "330xi", "330"]
-    deal_threshold: 0.15
-
-  - name: "BMW 130i / 135i (E81/E82/E87/E88)"
-    enabled: true
-    sources: [autoscout24]
-    price_max: 20000
-    year_min: 2005
-    year_max: 2014
-    mileage_max: 250000
-    cubic_capacity_min: 2900
-    fuel_types: [petrol]
-    autoscout24_models:
-      - {makeKey: bmw, modelKey: "130"}
-      - {makeKey: bmw, modelKey: "135"}
-    keywords_any: ["130i", "135i", "1er"]
-    deal_threshold: 0.15
-
-  # ---- Beispiel für ein späteres, ganz anderes Fahrzeug ----
-  # - name: "Audi S3 8V"
-  #   enabled: false
+  # ---- Beispiel-Profil (auskommentiert) ----
+  # - name: "BMW 335i (E90/E92)"
+  #   enabled: true
   #   sources: [autoscout24]
-  #   price_max: 25000
-  #   year_min: 2013
+  #   price_max: 20000
+  #   year_min: 2006
+  #   mileage_max: 250000
+  #   cubic_capacity_min: 2900     # >= 3.0 L
+  #   horsepower_min: 400          # z.B. nur getunte ab 400 PS
+  #   fuel_types: [petrol]
   #   autoscout24_models:
-  #     - {makeKey: audi, modelKey: "s3"}
-  #   keywords_any: ["S3"]
+  #     - {makeKey: bmw, modelKey: "335"}
+  #   keywords_any: ["335i", "335"]
+  #   deal_threshold: 0.15

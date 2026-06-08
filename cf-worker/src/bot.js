@@ -24,6 +24,7 @@ const POPULAR_BRANDS = [
 const HP_OPTIONS = [
   ["egal", 0], ["≥150 PS", 150], ["≥200 PS", 200],
   ["≥250 PS", 250], ["≥300 PS", 300], ["≥350 PS", 350],
+  ["≥400 PS", 400], ["≥450 PS", 450], ["≥500 PS", 500],
 ];
 
 // Karosserie (AutoScout24 bodyType-Keys)

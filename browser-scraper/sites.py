@@ -537,5 +537,79 @@ def scrape_mobile(pg, search, limit=30):
     return out
 
 
+# ---------------------------------------------------------------- facebook marketplace
+def scrape_facebook(pg, search, limit=30):
+    """Facebook-Marketplace-Freitextsuche. BEST-EFFORT — FB blockt Bots hart.
+
+    Erwartet einen eingeloggten Context (FB-Cookies werden in scrape.py gesetzt).
+    Returns:
+        list[dict] bei Erfolg, oder None bei Login-Wall / Checkpoint / Block —
+        damit der Aufrufer es als "blockiert" (skip + ggf. Notify) behandelt,
+        nicht als "0 Treffer".
+    """
+    kw = keyword(search) or "BMW"
+    url = "https://www.facebook.com/marketplace/search/?query=" + quote_plus(kw) + "&exact=false"
+    try:
+        pg.goto(url, wait_until="domcontentloaded", timeout=45000)
+    except Exception:
+        return None
+    pg.wait_for_timeout(3000)
+    accept_cookies(pg)
+    pg.wait_for_timeout(1500)
+    title = (pg.title() or "").lower()
+    cur = (pg.url or "").lower()
+    # Login-Wall / Checkpoint / Sperre → "blockiert" signalisieren.
+    if any(m in cur for m in ("login", "checkpoint", "/login/")) \
+            or any(m in title for m in ("log in", "anmelden", "facebook – log in")):
+        return None
+    for _ in range(4):
+        pg.mouse.wheel(0, 4000); pg.wait_for_timeout(1200)
+    rows = pg.eval_on_selector_all("a[href*='/marketplace/item/']", """els => {
+        const seen = new Set(); const out = [];
+        for (const a of els) {
+            let href = a.getAttribute('href'); if (!href) continue;
+            const idm = href.match(/\\/marketplace\\/item\\/(\\d+)/);
+            const id = idm ? idm[1] : href;
+            if (seen.has(id)) continue; seen.add(id);
+            let card = a;
+            for (let i=0;i<4 && card.parentElement;i++){ card = card.parentElement;
+                if ((card.innerText||'').length > 20) break; }
+            const img = card.querySelector('img');
+            out.push({ id, href,
+                lines: (card.innerText||'').split('\\n').map(s=>s.trim()).filter(Boolean),
+                img: img ? (img.getAttribute('src') || img.getAttribute('data-src') || '') : '' });
+        }
+        return out;
+    }""")
+    if not rows:
+        # Eingeloggt, aber 0 Cards → fast immer ein stiller Block/Redirect.
+        # Als "blockiert" werten, damit wir nicht fälschlich "0 Treffer" cachen.
+        return None
+    out = []
+    for r in rows[:limit]:
+        lines = r["lines"]
+        price = None
+        for l in lines:
+            if "chf" in l.lower() or re.search(r"\d['’]?\d{3}", l):
+                price = _money(l)
+                if price:
+                    break
+        title_line = _pick_title(lines)
+        href = r["href"]
+        if href.startswith("/"):
+            href = "https://www.facebook.com" + href
+        loc = ""
+        for l in reversed(lines):
+            if re.search(r"[A-Za-zÄÖÜ]", l) and not re.search(r"\d['’]?\d{3}", l) and l != title_line:
+                loc = l[:40]; break
+        out.append({"source": "facebook",
+                    "id": str(r["id"]),
+                    "url": href.split("?")[0],
+                    "title": title_line, "price": price, "image": r["img"],
+                    "date": "", "location": loc, "text": " | ".join(lines)})
+    return out
+
+
 SCRAPERS["kleinanzeigen"] = scrape_kleinanzeigen
 SCRAPERS["mobile"] = scrape_mobile
+SCRAPERS["facebook"] = scrape_facebook

@@ -8,7 +8,7 @@ import truststore; truststore.inject_into_ssl()
 import os, sys, json, re, time
 import requests
 from playwright.sync_api import sync_playwright
-from sites import scrape_ricardo, scrape_kleinanzeigen, scrape_mobile, UA
+from sites import scrape_ricardo, scrape_kleinanzeigen, scrape_mobile, scrape_facebook, UA
 from tuning import is_tuned, is_tuning_candidate
 try: sys.stdout.reconfigure(encoding="utf-8")
 except Exception: pass
@@ -18,18 +18,32 @@ WORKER_SECRET = os.environ.get("WORKER_SECRET", "")
 BOT = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 SEEN_FILE = os.path.join(os.path.dirname(__file__), "seen_browser.json")
+HEALTH_FILE = os.path.join(os.path.dirname(__file__), "health_browser.json")
+FB_COOKIE = os.environ.get("FB_COOKIE", "").strip()   # best-effort Facebook-Login
 ACTIVE_SOURCES = ["ricardo"]      # tutti deferred (overlaps AutoScout24 + fragile)
 EUR_TO_CHF = 0.95                 # rough — update every few months
+BLOCK_NOTIFY_HOURS = 6            # erst nach X h Dauerblock EINE Telegram-Notiz
 
 
 def log(m): print(m, flush=True)
 
 
-def get_config():
-    r = requests.get(f"{WORKER_URL}/searches", params={"key": WORKER_SECRET}, timeout=30)
-    r.raise_for_status()
-    d = r.json()
-    return d.get("searches", []), [w.lower() for w in d.get("blockwords", [])]
+def get_config(attempts=3):
+    """Aktive Suchen vom Worker holen — mit Retry + Backoff. Wirft erst nach
+    `attempts` Fehlversuchen weiter; der __main__-Wrapper fängt das ab und
+    beendet den Job grün (kein Fehlermail-Spam)."""
+    last = None
+    for i in range(attempts):
+        try:
+            r = requests.get(f"{WORKER_URL}/searches", params={"key": WORKER_SECRET}, timeout=30)
+            r.raise_for_status()
+            d = r.json()
+            return d.get("searches", []), [w.lower() for w in d.get("blockwords", [])]
+        except Exception as e:
+            last = e
+            log(f"  get_config Versuch {i + 1}/{attempts} fehlgeschlagen: {e!r}")
+            time.sleep(3 * (i + 1))
+    raise last
 
 
 def load_seen():
@@ -45,6 +59,76 @@ def save_seen(seen):
     seen = {k: v for k, v in seen.items() if v > cutoff}
     with open(SEEN_FILE, "w", encoding="utf-8") as f:
         json.dump(seen, f)
+
+
+# ---------------------------------------------------------------- status / health
+def tg_notify(text):
+    """Reine Status-Notiz an den Owner-Chat (kein Inserat). Schluckt alle Fehler."""
+    if not BOT or not CHAT:
+        return
+    try:
+        requests.post(f"https://api.telegram.org/bot{BOT}/sendMessage",
+                      json={"chat_id": CHAT, "text": text, "parse_mode": "Markdown",
+                            "disable_web_page_preview": True}, timeout=20)
+    except Exception:
+        pass
+
+
+def load_health():
+    try:
+        with open(HEALTH_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_health(health):
+    try:
+        with open(HEALTH_FILE, "w", encoding="utf-8") as f:
+            json.dump(health, f, indent=0)
+    except Exception as e:
+        log(f"  health speichern fehlgeschlagen: {e!r}")
+
+
+SOURCE_LABELS = {"ricardo": "ricardo.ch", "kleinanzeigen": "kleinanzeigen.de",
+                 "mobile": "mobile.de", "facebook": "Facebook Marketplace"}
+
+
+def mark_ok(health, now, src):
+    """Quelle war erreichbar. War sie vorher als blockiert gemeldet → Entwarnung."""
+    h = health.setdefault(src, {"ok": now, "notified": 0})
+    if h.get("notified"):
+        down_h = (now - h.get("ok", now)) / 3600.0
+        tg_notify(f"✅ *{SOURCE_LABELS.get(src, src)}* wieder erreichbar "
+                  f"(war ~{down_h:.0f} h blockiert).")
+        h["notified"] = 0
+    h["ok"] = now
+
+
+def mark_blocked(health, now, src):
+    """Quelle blockiert. EINE Notiz nach BLOCK_NOTIFY_HOURS Dauerblock, danach
+    frühestens wieder nach einem weiteren BLOCK_NOTIFY_HOURS-Fenster."""
+    h = health.setdefault(src, {"ok": now, "notified": 0})
+    down_h = (now - h.get("ok", now)) / 3600.0
+    last_note_h = (now - h["notified"]) / 3600.0 if h.get("notified") else 1e9
+    if down_h >= BLOCK_NOTIFY_HOURS and last_note_h >= BLOCK_NOTIFY_HOURS:
+        tg_notify(f"⚠️ *{SOURCE_LABELS.get(src, src)}* seit ~{down_h:.0f} h "
+                  f"durchgehend blockiert — wird weiter automatisch versucht.")
+        h["notified"] = now
+
+
+def _fb_cookies(raw):
+    """'c_user=123; xs=abc; …' → Playwright-Cookie-Liste für .facebook.com."""
+    out = []
+    for part in raw.split(";"):
+        part = part.strip()
+        if "=" not in part:
+            continue
+        k, v = part.split("=", 1)
+        if k.strip():
+            out.append({"name": k.strip(), "value": v.strip(),
+                        "domain": ".facebook.com", "path": "/"})
+    return out
 
 
 def fmt_price(p):
@@ -182,9 +266,12 @@ def main():
     log(f"{len(searches)} Suchen ({len(ch_searches)} 🇨🇭, {len(de_searches)} 🇩🇪), "
         f"{len(blockwords)} Sperrwörter")
     seen = load_seen()
+    health = load_health()
     now = time.time()
     new_count = alert_count = blocked = 0
     de_new = de_alerts = 0
+    fb_new = fb_alerts = 0
+    attempted, reachable = set(), set()
     ricardo_groups = []
     mobile_groups = []
 
@@ -201,10 +288,19 @@ def main():
             "Object.defineProperty(navigator,'languages',{get:()=>['de-CH','de','en']});"
             "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3]});")
 
+        # Best-effort Facebook-Login: Cookie-String "k=v; k=v" → Context-Cookies.
+        if FB_COOKIE:
+            try:
+                ctx.add_cookies(_fb_cookies(FB_COOKIE))
+                log("  Facebook-Cookie geladen.")
+            except Exception as e:
+                log(f"  Facebook-Cookie ungültig: {e!r}")
+
         # ---------------- 🇨🇭 ricardo (CH) — pro AS24-Suche ----------------
         for search in ch_searches:
             label = search.get("label") or search.get("makeName", "Suche")
             for src in ACTIVE_SOURCES:
+                attempted.add(src)
                 try:
                     pg = ctx.new_page()
                     listings = scrape_ricardo(pg, search, 40) if src == "ricardo" else None
@@ -214,6 +310,7 @@ def main():
                 if listings is None:
                     log(f"  ⤬ {src} · {label}: blockiert/nicht erreichbar — übersprungen")
                     blocked += 1; continue
+                reachable.add(src)
                 hits = [l for l in listings if matches(l, search, blockwords)]
                 if src == "ricardo" and hits:
                     ricardo_groups.append({"label": label, "listings": [
@@ -238,6 +335,7 @@ def main():
         for search in de_searches:
             label = search.get("label") or search.get("makeName", "DE-Suche")
             sid = search.get("id") or label
+            attempted.add("kleinanzeigen")
             try:
                 pg = ctx.new_page()
                 raw = scrape_kleinanzeigen(pg, search, 40)
@@ -247,6 +345,7 @@ def main():
             if raw is None:
                 log(f"  ⤬ kleinanzeigen · {label}: blockiert — übersprungen")
                 blocked += 1; continue
+            reachable.add("kleinanzeigen")
             hits = [l for l in raw if matches_de(l, search, blockwords)]
             log(f"  🇩🇪 kleinanzeigen · {label}: {len(raw)} gescrapt, "
                 f"{len(hits)} Tuning-passend")
@@ -284,6 +383,7 @@ def main():
         # Pro DE-Suche scrapen → tuning-gefilterte Gruppe → /mobilecache. KEINE Alerts.
         for search in de_searches:
             label = search.get("label") or search.get("makeName", "DE-Suche")
+            attempted.add("mobile")
             try:
                 pg = ctx.new_page()
                 raw = scrape_mobile(pg, search, 25)
@@ -293,6 +393,7 @@ def main():
             if raw is None:
                 log(f"  ⤬ mobile.de · {label}: blockiert — übersprungen")
                 blocked += 1; continue
+            reachable.add("mobile")
             hits = [l for l in raw if matches_de(l, search, blockwords)]
             log(f"  🇩🇪 mobile.de · {label}: {len(raw)} gescrapt, "
                 f"{len(hits)} Tuning-passend (nur Cache)")
@@ -302,9 +403,49 @@ def main():
                         "title", "price", "url", "image", "year", "mileage",
                         "horsepower", "location")} for l in hits[:8]]})
 
+        # ---------------- 📘 Facebook Marketplace (best-effort, CH-Suchen) ----------------
+        if FB_COOKIE:
+            for search in ch_searches:
+                label = search.get("label") or search.get("makeName", "Suche")
+                attempted.add("facebook")
+                try:
+                    pg = ctx.new_page()
+                    listings = scrape_facebook(pg, search, 30)
+                    pg.close()
+                except Exception as e:
+                    log(f"  ✗ facebook '{label}': {e!r}"); continue
+                if listings is None:
+                    log(f"  ⤬ facebook · {label}: Login-Wall/blockiert — übersprungen")
+                    blocked += 1; continue
+                reachable.add("facebook")
+                hits = [l for l in listings if matches(l, search, blockwords)]
+                skey = f"__seeded__:facebook:{search.get('id', label)}"
+                seeded = skey in seen
+                log(f"  📘 facebook · {label}: {len(listings)} gescrapt, {len(hits)} passend"
+                    + ("" if seeded else " (Erstaufnahme – kein Alarm)"))
+                for l in hits:
+                    uid = f"facebook:{l['id']}"
+                    if uid in seen:
+                        seen[uid] = now; continue
+                    seen[uid] = now; fb_new += 1
+                    if not seeded: continue
+                    send_card(l, label); fb_alerts += 1
+                    time.sleep(0.25)
+                if not seeded:
+                    seen[skey] = now
+        else:
+            log("  📘 facebook: kein FB_COOKIE gesetzt — übersprungen.")
+
         b.close()
 
+    # Health/Block-Status pro Quelle aktualisieren (EINE Notiz nach Dauerblock).
+    for src in attempted:
+        if src in reachable:
+            mark_ok(health, now, src)
+        else:
+            mark_blocked(health, now, src)
     save_seen(seen)
+    save_health(health)
     # ricardo-Cache
     if ricardo_groups and WORKER_SECRET:
         try:
@@ -321,8 +462,19 @@ def main():
             f"({sum(len(g['listings']) for g in mobile_groups)} Inserate, "
             f"{len(mobile_groups)} Gruppen).")
     log(f"Fertig: 🇨🇭 {new_count} neu / {alert_count} Alarme, "
-        f"🇩🇪 {de_new} neu / {de_alerts} Alarme, {blocked} Quellen blockiert.")
+        f"🇩🇪 {de_new} neu / {de_alerts} Alarme, "
+        f"📘 {fb_new} neu / {fb_alerts} Alarme, {blocked} Quellen-Läufe blockiert.")
 
 
 if __name__ == "__main__":
-    main()
+    # Oberste Schutzschicht: ein unerwarteter Fehler darf den Job NICHT rot
+    # färben (sonst Fehlermail-Spam). Wir loggen, versuchen eine Telegram-Notiz
+    # und beenden mit Exit 0 — der nächste 30-Min-Lauf probiert es erneut.
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        log("‼️ Unerwarteter Fehler — Lauf abgebrochen, aber Job bleibt grün:")
+        log(traceback.format_exc())
+        tg_notify(f"‼️ Browser-Scan-Lauf abgebrochen: `{e!r}`\nNächster Versuch in ~30 Min.")
+        sys.exit(0)

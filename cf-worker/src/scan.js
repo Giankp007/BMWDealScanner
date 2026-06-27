@@ -1,8 +1,13 @@
 // Scanning, deal scoring, keyword filtering and rich (photo) messages.
 import { fetchListings, fetchDescription } from "./autoscout24.js";
 import { getSearches, getSeen, saveSeen, getBlockwords, cacheListing,
-         getKleinCache } from "./store.js";
+         getKleinCache, getPrices, savePrices, addPriceDrop,
+         getHeartbeat, saveHeartbeat } from "./store.js";
 import { keyboard } from "./telegram.js";
+
+// Preissenkung erst ab dieser Höhe melden (gegen Mikro-/Rundungs-Rauschen).
+const DROP_MIN_CHF = 100;
+const DROP_MIN_FRAC = 0.01; // und mind. 1 %
 
 // Rough EUR→CHF for the parenthetical hint on DE listings. Update every few months.
 const EUR_TO_CHF = 0.95;
@@ -124,6 +129,38 @@ async function sendCard(env, tgApi, chatId, l, searchLabel, sc) {
   await tgApi.sendMessage(chatId, caption, kb);
 }
 
+// Send a price-drop card: same listing, but headed with the old→new price.
+// Caches the listing too, so ⭐ Merken and /mehrinfo keep working on it.
+async function sendPriceDropCard(env, tgApi, chatId, l, searchLabel, oldPrice) {
+  await cacheListing(env, { ...l, searchLabel });
+  const de = isDeSource(l.source);
+  const oldTxt = de ? fmtEurChf(oldPrice) : fmtPrice(oldPrice);
+  const newTxt = de ? fmtEurChf(l.price) : fmtPrice(l.price);
+  const diff = oldPrice - l.price;
+  const diffTxt = de ? fmtEurChf(diff) : fmtPrice(diff);
+  const pct = Math.round((diff / oldPrice) * 100);
+  const lines = [
+    flagFor(l.source) + " 📉 *Preis gesenkt* (−" + pct + "%)",
+    "*" + l.title + "*",
+    "~" + oldTxt + "~  →  💰 *" + newTxt + "*",
+    "🟢 " + diffTxt + " günstiger",
+  ];
+  const spec = specLine(l);
+  if (spec) lines.push(spec);
+  const meta = [];
+  if (l.location) meta.push("📍 " + l.location);
+  if (meta.length) lines.push(meta.join("  ·  "));
+  lines.push("🔎 _" + searchLabel + "_");
+  lines.push("[➜ Inserat ansehen](" + l.url + ")  ·  ↩️ _/mehrinfo als Antwort_");
+  const caption = lines.join("\n");
+  const kb = keyboard([[{ text: "⭐ Merken", data: "fav:" + l.uid }]]);
+  if (l.image) {
+    const res = await tgApi.sendPhoto(chatId, l.image, caption, kb);
+    if (res && res.ok) return;
+  }
+  await tgApi.sendMessage(chatId, caption, kb);
+}
+
 // Send one favorite as a card with an "entfernen" button (used by /favoriten).
 export async function sendFavoriteCard(tgApi, chatId, f) {
   const caption = buildCaption(f, f.searchLabel || "", { discount: 0, label: "⭐ Favorit" });
@@ -208,26 +245,46 @@ export async function seedSearch(env, search) {
   }
 }
 
-// Cron scan: alert on genuinely new, non-blocked listings (photo cards).
-// Always reports back — even with nothing new — so Giank never has to ask.
+// Text der zusammengefassten Heartbeat-Statusmeldung. Zählt die leeren Checks in
+// Folge hoch und zeigt, wie lange schon nichts Neues kam.
+function heartbeatText(count, since, now) {
+  const mins = Math.max(0, Math.round((now - since) / 60000));
+  let span;
+  if (mins < 60) span = "seit " + mins + " Min";
+  else {
+    const h = Math.floor(mins / 60), m = mins % 60;
+    span = "seit " + h + " Std" + (m ? " " + m + " Min" : "");
+  }
+  const checkWord = count <= 1 ? "1. Check" : count + ". Check in Folge";
+  return "😴 Noch nichts Neues — " + checkWord + " ohne Treffer (" + span + ").\n" +
+         "Ich scanne weiter, nächster Check in ~30 Min. 🔄";
+}
+
+// Cron scan: alert on genuinely new, non-blocked listings + price drops (photo cards).
+// Statt jeden leeren Check zu posten, hält der Scanner EINE Heartbeat-Statusmeldung,
+// löscht die alte und zählt hoch — so muss Giank nie durch hunderte Meldungen scrollen.
 // CH zuerst: kleinanzeigen-Suchen werden hier übersprungen (Python-Scraper sendet
-// die DE-Alerts separat, damit AS24 nicht von DE übertönt wird).
+// die DE-Alerts separat, damit AS24 nicht von DE übertönt wird). Pausierte Suchen
+// (s.paused) werden komplett übersprungen.
 export async function scanAndAlert(env, tgApi, chatId) {
   const allSearches = await getSearches(env);
-  const searches = allSearches.filter((s) => !s.source || s.source === "autoscout24");
+  const searches = allSearches.filter(
+    (s) => (!s.source || s.source === "autoscout24") && !s.paused);
   if (!searches.length) {
     if (!allSearches.length) {
       await tgApi.sendMessage(chatId,
         "🔄 Check gemacht — du hast aktuell keine aktiven Suchen. Mit /addcar legst du eine an.");
     }
-    // Nur DE-Suchen aktiv → Worker macht nichts, Scraper meldet sich.
+    // Nur DE-/pausierte Suchen aktiv → Worker scannt nichts, Scraper meldet sich.
     return;
   }
   const seen = await getSeen(env);
+  const prices = await getPrices(env);
   const blockwords = await getBlockwords(env);
   const now = Date.now();
   const budget = { left: 46 }; // Worker free-tier subrequest guard
   let sent = 0;
+  let drops = 0;
   let truncated = false;
   outer: for (const search of searches) {
     let listings;
@@ -239,10 +296,32 @@ export async function scanAndAlert(env, tgApi, chatId) {
     }
     const med = median(listings.map((l) => l.price));
     for (const l of listings) {
-      if (seen[l.uid]) {
-        seen[l.uid] = now;
-        continue;
+      // --- Preis-Tracking für ALLE Inserate (auch schon gesehene) ---
+      if (l.price != null) {
+        const prev = prices[l.uid];
+        let record = true;
+        if (prev && l.price < prev.p) {
+          const diff = prev.p - l.price;
+          if (diff >= DROP_MIN_CHF && diff / prev.p >= DROP_MIN_FRAC) {
+            if (budget.left >= 4) {
+              budget.left -= 2;
+              await sendPriceDropCard(env, tgApi, chatId, l, search.label, prev.p);
+              await addPriceDrop(env, {
+                uid: l.uid, title: l.title, url: l.url, image: l.image,
+                old: prev.p, new: l.price, ts: now,
+                searchLabel: search.label, source: l.source,
+              });
+              drops++;
+              await sleep(120);
+            } else {
+              record = false; // Budget alle → Senkung beim nächsten Scan melden
+            }
+          }
+        }
+        if (record) prices[l.uid] = { p: l.price, t: now };
       }
+
+      if (seen[l.uid]) { seen[l.uid] = now; continue; }
       // leave remaining unseen so the next scan picks them up
       if (budget.left < 3) { truncated = true; break outer; }
       budget.left -= 1;
@@ -256,13 +335,25 @@ export async function scanAndAlert(env, tgApi, chatId) {
     }
   }
   await saveSeen(env, seen);
+  await savePrices(env, prices);
 
-  // Heartbeat: melde dich IMMER, damit klar ist, dass der Scanner lebt.
-  if (sent === 0) {
-    await tgApi.sendMessage(chatId,
-      "😕 Leider habe ich keine neuen Inserate gefunden. Nächster Check in ~30 Min. 🔄");
-  } else if (truncated) {
-    await tgApi.sendMessage(chatId,
-      "ℹ️ Das waren " + sent + " neue Treffer — es gibt noch mehr, die kommen beim nächsten Scan.");
+  // --- Heartbeat: genau EINE Statusmeldung gleichzeitig ---
+  const hb = await getHeartbeat(env);
+  const activity = sent + drops;
+  if (hb.msgId) { try { await tgApi.deleteMessage(chatId, hb.msgId); } catch (e) {} }
+  if (activity > 0) {
+    // Echte Treffer/Senkungen → Zähler nullen, keine Heartbeat-Meldung.
+    await saveHeartbeat(env, { msgId: null, count: 0, since: null, lastHit: now });
+    if (truncated) {
+      await tgApi.sendMessage(chatId,
+        "ℹ️ Das waren " + sent + " neue Treffer — es gibt noch mehr, die kommen beim nächsten Scan.");
+    }
+  } else {
+    // Nichts Neues → eine hochzählende Statusmeldung neu setzen.
+    const count = (hb.count || 0) + 1;
+    const since = hb.since || now;
+    const res = await tgApi.sendMessage(chatId, heartbeatText(count, since, now));
+    const msgId = res && res.ok && res.result ? res.result.message_id : null;
+    await saveHeartbeat(env, { msgId, count, since, lastHit: hb.lastHit });
   }
 }

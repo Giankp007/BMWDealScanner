@@ -80,6 +80,32 @@ export async function fetchDescription(id) {
   }
 }
 
+// Alle Bild-URLs eines Detail-Items (für die /mehrinfo-Galerie).
+function allImageUrls(item) {
+  const imgs = item.images || [];
+  const out = [];
+  for (const im of imgs) {
+    const key = typeof im === "string" ? im : im.key || im.url || "";
+    if (!key) continue;
+    out.push(key.startsWith("http") ? key : IMG_BASE + key);
+  }
+  return out;
+}
+
+// Vollständiges Inserat (für /mehrinfo). Liefert das rohe Detail-Objekt + alle
+// Bild-URLs. Null bei Fehler/Nicht-gefunden.
+export async function fetchListingDetail(id) {
+  try {
+    const r = await fetch("https://api.autoscout24.ch/v1/listings/" + id, { headers: HEADERS });
+    if (!r.ok) return null;
+    const d = await r.json();
+    d._images = allImageUrls(d);
+    return d;
+  } catch (e) {
+    return null;
+  }
+}
+
 // Fetch up to maxListings cheapest matching listings (PRICE ASC).
 export async function fetchListings(search, maxListings = 250) {
   const query = buildQuery(search);

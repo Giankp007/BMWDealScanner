@@ -36,6 +36,10 @@ export function tg(token) {
         parse_mode: "Markdown",
         ...extra,
       }),
+    // Galerie aus 2–10 Bildern. media = [{ type:"photo", media:url, caption?, parse_mode? }].
+    // Caption (falls gewünscht) gehört aufs ERSTE Element.
+    sendMediaGroup: (chatId, media) =>
+      call("sendMediaGroup", { chat_id: chatId, media }),
     answerCallbackQuery: (id, text = "") =>
       call("answerCallbackQuery", { callback_query_id: id, text }),
     deleteMessage: (chatId, msgId) =>

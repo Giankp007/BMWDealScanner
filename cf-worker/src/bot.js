@@ -1,12 +1,13 @@
 // Telegram command + callback handling (interactive menus).
 import { keyboard, chunk } from "./telegram.js";
-import { fetchModels, fetchMakes } from "./autoscout24.js";
+import { fetchModels, fetchMakes, fetchListingDetail } from "./autoscout24.js";
 import {
-  getSearches, addSearch, removeSearch,
+  getSearches, addSearch, removeSearch, updateSearch,
   getBlockwords, addBlockword, removeBlockword,
   getRicache, getMobileCache, setZeigCtx, getZeigCtx,
   setPending, getPending, clearPending,
   getFavorites, addFavorite, removeFavorite, isFavorite, getCachedListing,
+  getSeen, getPrices, getPriceDrops, getHeartbeat,
 } from "./store.js";
 import { fmtPrice, sendListingsPage, sendFavoriteCard } from "./scan.js";
 
@@ -256,9 +257,13 @@ export const COMMANDS = [
   { command: "kleinanzeigen", description: "🇩🇪 Neue kleinanzeigen.de-Suche (nur Tuning)" },
   { command: "mobile", description: "🇩🇪 Heisse mobile.de-Inserate ansehen" },
   { command: "scrape", description: "🤖 DE-Scraper sofort manuell laufen lassen (~2 Min)" },
+  { command: "edit", description: "✏️ Suche bearbeiten / pausieren" },
   { command: "deletecar", description: "Eine Auto-Suche löschen" },
   { command: "list", description: "Aktive Suchen anzeigen" },
+  { command: "stats", description: "📊 Übersicht & Status" },
   { command: "deals", description: "Beste Treffer aller CH-Suchen" },
+  { command: "preis", description: "📉 Jüngste Preissenkungen" },
+  { command: "mehrinfo", description: "↩️ Antwort auf ein Inserat → komplettes Inserat + alle Bilder" },
   { command: "favoriten", description: "⭐ Gemerkte Autos anzeigen" },
   { command: "zeig", description: "Suche auswählen & beste zeigen (oder /zeig BMW 335)" },
   { command: "ricardo", description: "Neueste ricardo-Treffer zeigen" },
@@ -344,15 +349,23 @@ const HELP =
   "/kleinanzeigen – Shortcut für 🇩🇪 kleinanzeigen.de-Suche anlegen\n" +
   "/mobile – 🇩🇪 mobile.de-Inserate ansehen (kein Auto-Alarm)\n" +
   "/scrape – DE-Scraper sofort manuell laufen lassen (~2 Min)\n" +
+  "/edit – ✏️ Suche bearbeiten (Preis/PS/Jahr/…) oder pausieren\n" +
   "/deletecar – eine Suche löschen\n" +
   "/list – aktive Suchen (CH + DE)\n" +
+  "/stats – 📊 Übersicht & Status (Suchen, Treffer, letzter Fund)\n" +
   "/deals – beste 🇨🇭 Treffer aller aktiven CH-Suchen\n" +
+  "/preis – 📉 jüngste Preissenkungen\n" +
   "/favoriten – ⭐ deine gemerkten Autos\n" +
   "/zeig – Suche auswählen & Treffer zeigen (oder `/zeig BMW 335`)\n" +
   "/ricardo – neueste ricardo-Treffer\n" +
   "/block <wort> – Stichwort sperren (gilt für alle Quellen)\n" +
   "/blocklist – gesperrte Stichwörter ansehen/entfernen\n" +
   "/clear – Chat aufräumen\n\n" +
+  "↩️ *Komplettes Inserat:* Antworte auf eine Inserat-Karte mit `/mehrinfo` — " +
+  "dann hole ich alle Daten (Hubraum, Zylinder, Verbrauch, Ausstattung …) " +
+  "*und alle Bilder* in den Chat. 🇨🇭 AutoScout24 voll, 🇩🇪 eingeschränkt.\n\n" +
+  "📉 *Preis-Alarm:* Fällt bei einem beobachteten Auto der Preis, kommt automatisch " +
+  "eine „Preis gesenkt“-Karte. Übersicht via /preis.\n\n" +
   "🔧 Auf 🇩🇪-Inseraten zeigt der Bot nur Autos mit Tuning-Hinweisen " +
   "(Stage 2, Eisenmann, KW, Kompressor, Akrapovic, etc.).";
 
@@ -363,6 +376,10 @@ export async function handleMessage(env, tgApi, msg) {
 
   if (text.startsWith("/start") || text.startsWith("/help")) {
     return tgApi.sendMessage(chatId, HELP);
+  }
+  // /mehrinfo (auch „mehrinfo" / „mehr info") als Antwort auf eine Inserat-Karte.
+  if (/^\/?mehr ?info\b/i.test(text)) {
+    return sendMehrinfo(env, tgApi, chatId, msg.reply_to_message);
   }
   if (text.startsWith("/addcar")) {
     await clearPending(env, chatId);
@@ -384,6 +401,15 @@ export async function handleMessage(env, tgApi, msg) {
   }
   if (text.startsWith("/scrape")) {
     return triggerScrape(env, tgApi, chatId);
+  }
+  if (text.startsWith("/edit") || text.startsWith("/bearbeiten")) {
+    return sendEditMenu(env, tgApi, chatId);
+  }
+  if (text.startsWith("/stats") || text.startsWith("/status")) {
+    return sendStats(env, tgApi, chatId);
+  }
+  if (text.startsWith("/preis")) {
+    return sendPriceDrops(env, tgApi, chatId);
   }
   if (text.startsWith("/list")) {
     return sendList(env, tgApi, chatId);
@@ -753,6 +779,52 @@ export async function handleCallback(env, tgApi, cq) {
     return tgApi.deleteMessage(chatId, msgId);
   }
 
+  // --- /edit: Suche bearbeiten ---
+  if (data.startsWith("ed:")) {
+    const id = data.slice(3);
+    await tgApi.answerCallbackQuery(cq.id);
+    return showEditFields(env, tgApi, chatId, msgId, id);
+  }
+  if (data.startsWith("ef:")) {
+    const parts = data.split(":");
+    const id = parts[1], field = parts[2];
+    const s = (await getSearches(env)).find((x) => x.id === id);
+    if (!s) { await tgApi.answerCallbackQuery(cq.id, "Suche weg – /edit neu."); return; }
+    await tgApi.answerCallbackQuery(cq.id);
+    const rows = editValueKeyboard(id, field, s.source);
+    const FIELD_DE = { price: "Max-Preis", hp: "Mindest-PS", year: "Jahr ab", fuel: "Treibstoff", body: "Karosserie" };
+    return tgApi.editMessageText(chatId, msgId,
+      "✏️ *" + searchLabel(s) + "*\nNeuer Wert für *" + (FIELD_DE[field] || field) + "*:", keyboard(rows));
+  }
+  if (data.startsWith("eset:")) {
+    const parts = data.split(":");
+    const id = parts[1], field = parts[2], value = parts.slice(3).join(":");
+    const s = (await getSearches(env)).find((x) => x.id === id);
+    if (!s) { await tgApi.answerCallbackQuery(cq.id, "Suche weg – /edit neu."); return; }
+    const patch = {};
+    if (field === "price") patch.maxPrice = parseInt(value, 10) || null;
+    else if (field === "hp") patch.minHp = parseInt(value, 10) || null;
+    else if (field === "year") patch.minYear = parseInt(value, 10) || null;
+    else if (field === "fuel") { patch.fuelChoice = value === "egal" ? null : value; patch.fuelTypes = FUEL_KEYS[value] || []; }
+    else if (field === "body") { patch.bodyKey = value || null; patch.bodyTypes = value ? [value] : []; }
+    patch.label = searchLabel({ ...s, ...patch });
+    await updateSearch(env, id, patch);
+    await tgApi.answerCallbackQuery(cq.id, "Gespeichert!");
+    return showEditFields(env, tgApi, chatId, msgId, id);
+  }
+  if (data.startsWith("epause:")) {
+    const id = data.slice(7);
+    const s = (await getSearches(env)).find((x) => x.id === id);
+    if (!s) { await tgApi.answerCallbackQuery(cq.id, "Suche weg – /edit neu."); return; }
+    await updateSearch(env, id, { paused: !s.paused });
+    await tgApi.answerCallbackQuery(cq.id, s.paused ? "Fortgesetzt ▶️" : "Pausiert ⏸");
+    return showEditFields(env, tgApi, chatId, msgId, id);
+  }
+  if (data === "eclose") {
+    await tgApi.answerCallbackQuery(cq.id);
+    return tgApi.editMessageText(chatId, msgId, "✅ Fertig. /list zeigt deine aktuellen Suchen.");
+  }
+
   if (data.startsWith("d:")) {
     const id = data.slice(2);
     const kept = await removeSearch(env, id);
@@ -1036,5 +1108,308 @@ async function sendMobile(env, tgApi, chatId) {
       }
       await tgApi.sendMessage(chatId, cap);
     }
+  }
+}
+
+// ================= /mehrinfo: komplettes Inserat im Chat =================
+const FUEL_DE = {
+  petrol: "Benzin", diesel: "Diesel", electric: "Elektro", gas: "Gas",
+  hydrogen: "Wasserstoff", "mhev-petrol": "Mild-Hybrid (Benzin)",
+  "phev-petrol": "Plug-in-Hybrid (Benzin)", "hev-petrol": "Hybrid (Benzin)",
+  "mhev-diesel": "Mild-Hybrid (Diesel)", "phev-diesel": "Plug-in-Hybrid (Diesel)",
+  "hev-diesel": "Hybrid (Diesel)",
+};
+const TRANS_DE = { automatic: "Automat", manual: "Handschaltung", "semi-automatic": "halbautomatisch" };
+const DRIVE_DE = { all: "Allrad", front: "Frontantrieb", rear: "Heckantrieb" };
+const COND_DE = {
+  new: "Neu", used: "Occasion", demonstration: "Vorführwagen",
+  oldtimer: "Oldtimer", "pre-registered": "Tageszulassung",
+};
+const COLOR_DE = {
+  black: "Schwarz", white: "Weiss", grey: "Grau", gray: "Grau", silver: "Silber",
+  blue: "Blau", red: "Rot", green: "Grün", yellow: "Gelb", orange: "Orange",
+  brown: "Braun", beige: "Beige", gold: "Gold", bordeaux: "Bordeaux",
+  violet: "Violett", purple: "Violett",
+};
+const ARR_DE = { "in-line": "Reihe", inline: "Reihe", v: "V", boxer: "Boxer", w: "W", radial: "Radial" };
+
+function de(map, key) { return key ? (map[key] || key) : null; }
+function escapeMd(s) { return String(s || "").replace(/([_*`\[\]])/g, "\\$1"); }
+function chf(n) {
+  return n != null ? "CHF " + Math.round(n).toLocaleString("de-CH").replace(/,/g, "'") : null;
+}
+
+// uid aus einer Inserat-Karte (Reply-Nachricht): zuerst über den callback_data
+// der Buttons (fav:/uf:), sonst über die AS24-URL in den Text-/Caption-Entities.
+function uidFromMessage(m) {
+  if (!m) return null;
+  const kb = m.reply_markup && m.reply_markup.inline_keyboard;
+  if (kb) for (const row of kb) for (const b of row) {
+    const d = b.callback_data || "";
+    if (d.startsWith("fav:")) return d.slice(4);
+    if (d.startsWith("uf:")) return d.slice(3);
+  }
+  const ents = m.caption_entities || m.entities || [];
+  for (const e of ents) {
+    if (e.type === "text_link" && e.url) {
+      const mt = e.url.match(/autoscout24\.ch\/de\/d\/(\d+)/);
+      if (mt) return "autoscout24:" + mt[1];
+    }
+  }
+  const txt = m.caption || m.text || "";
+  const mt = txt.match(/autoscout24\.ch\/de\/d\/(\d+)/);
+  if (mt) return "autoscout24:" + mt[1];
+  return null;
+}
+
+// Spec-Caption (ohne langen Inserattext) für das AS24-Volldetail.
+function buildDetailCaption(d, cached) {
+  const make = (d.make || {}).name || "";
+  const model = (d.model || {}).name || "";
+  const ver = d.versionFullName || "";
+  const title = (cached && cached.title) ||
+    [make, model, ver].filter(Boolean).join(" ").trim() || "Inserat";
+  const id = String(d.id);
+  const url = (cached && cached.url) || "https://www.autoscout24.ch/de/d/" + id;
+  const lines = ["🇨🇭 *" + escapeMd(title) + "*"];
+
+  let priceLine = "💰 " + (chf(d.price) || "Preis k.A.");
+  if (d.previousPrice && d.previousPrice > d.price) priceLine += "  (war " + chf(d.previousPrice) + ")";
+  lines.push(priceLine);
+
+  const reg = d.firstRegistrationYear || (d.firstRegistrationDate || "").slice(0, 4) || null;
+  const eck = [];
+  if (reg) eck.push("📅 EZ " + reg);
+  if (d.mileage != null) eck.push("🛣 " + d.mileage.toLocaleString("de-CH").replace(/,/g, "'") + " km");
+  if (d.horsePower) eck.push("⚙ " + d.horsePower + " PS" + (d.kiloWatts ? " (" + d.kiloWatts + " kW)" : ""));
+  if (eck.length) lines.push(eck.join("  ·  "));
+
+  const mot = [];
+  if (d.cubicCapacity) mot.push(d.cubicCapacity.toLocaleString("de-CH").replace(/,/g, "'") + " ccm");
+  if (d.cylinders) mot.push(d.cylinders + " Zyl." + (d.cylinderArrangement ? " (" + de(ARR_DE, d.cylinderArrangement) + ")" : ""));
+  const fuel = de(FUEL_DE, d.fuelType);
+  if (fuel) mot.push(fuel);
+  if (mot.length) lines.push("🔧 " + mot.join(" · "));
+
+  const cons = d.consumption || {};
+  const emi = [];
+  if (cons.combined != null) {
+    let c = "⛽ " + cons.combined + " l/100km komb.";
+    const sub = [];
+    if (cons.urban != null) sub.push("Stadt " + cons.urban);
+    if (cons.extraUrban != null) sub.push("Land " + cons.extraUrban);
+    if (sub.length) c += " (" + sub.join(", ") + ")";
+    emi.push(c);
+  }
+  if (d.co2Emission != null) emi.push("CO₂ " + d.co2Emission + " g/km");
+  if (d.emissionStandard) emi.push(String(d.emissionStandard).toUpperCase());
+  if (emi.length) lines.push(emi.join(" · "));
+
+  const drv = [];
+  const trans = de(TRANS_DE, d.transmissionType);
+  if (trans) drv.push("🔀 " + trans + (d.gears ? ", " + d.gears + " Gänge" : ""));
+  const drive = de(DRIVE_DE, d.driveType);
+  if (drive) drv.push(drive);
+  if (drv.length) lines.push(drv.join(" · "));
+
+  const kar = [];
+  if (d.bodyColor) kar.push("🎨 " + de(COLOR_DE, d.bodyColor) + (d.metallic ? " (met.)" : ""));
+  if (d.interiorColor) kar.push("Innen " + de(COLOR_DE, d.interiorColor));
+  if (d.doors) kar.push(d.doors + " Türen");
+  if (d.seats) kar.push(d.seats + " Sitze");
+  if (kar.length) lines.push(kar.join(" · "));
+
+  const zus = [];
+  const cond = de(COND_DE, d.conditionType);
+  if (cond) zus.push("✅ " + cond);
+  if (d.hadAccident === true) zus.push("⚠️ Unfallfahrzeug");
+  else if (d.hadAccident === false) zus.push("unfallfrei");
+  if (d.directImport === true) zus.push("Direktimport");
+  if (d.lastInspectionDate) zus.push("MFK " + String(d.lastInspectionDate).slice(0, 7));
+  if (zus.length) lines.push(zus.join(" · "));
+
+  if (cached && cached.location) lines.push("📍 " + cached.location);
+  lines.push("[➜ Auf AutoScout24 öffnen](" + url + ")");
+
+  let cap = lines.join("\n");
+  if (cap.length > 1020) cap = cap.slice(0, 1015) + "…";
+  return cap;
+}
+
+// /mehrinfo (Reply): komplettes Inserat — alle Daten + alle Bilder — in den Chat.
+async function sendMehrinfo(env, tgApi, chatId, replyMsg) {
+  const uid = uidFromMessage(replyMsg);
+  if (!uid) {
+    return tgApi.sendMessage(chatId,
+      "↩️ *So geht's:* Antworte mit `/mehrinfo` *direkt auf eine Inserat-Karte* " +
+      "(aus /deals, /zeig, einem Alarm oder den Favoriten). Dann hole ich dir das " +
+      "komplette Inserat — alle Daten und Bilder — hier in den Chat.");
+  }
+  const cached = await getCachedListing(env, uid);
+
+  // 🇩🇪-Inserate: keine Detail-API → zeige, was im Cache liegt, + Link.
+  if (!uid.startsWith("autoscout24:")) {
+    if (!cached) {
+      return tgApi.sendMessage(chatId,
+        "🇩🇪 Für dieses Inserat habe ich keine erweiterten Daten (DE-Quelle ohne Detail-API). " +
+        "Öffne es direkt über den Link in der Karte.");
+    }
+    const lines = ["🇩🇪 *" + escapeMd(cached.title || "Inserat") + "*"];
+    if (cached.price != null) lines.push("💰 € " + cached.price.toLocaleString("de-CH").replace(/,/g, "'"));
+    const sp = [];
+    if (cached.year) sp.push("📅 " + cached.year);
+    if (cached.mileage != null) sp.push("🛣 " + cached.mileage.toLocaleString("de-CH").replace(/,/g, "'") + " km");
+    if (cached.horsepower) sp.push("⚙ " + cached.horsepower + " PS");
+    if (sp.length) lines.push(sp.join("  ·  "));
+    if (cached.location) lines.push("📍 " + cached.location);
+    const teaser = cached.teaser_full || cached.teaser || "";
+    if (teaser) lines.push("\n📝 " + teaser.slice(0, 800));
+    lines.push("\n[➜ Inserat ansehen](" + cached.url + ")");
+    lines.push("_(Volldetail mit allen Bildern gibt's nur für 🇨🇭 AutoScout24.)_");
+    if (cached.image) {
+      const r = await tgApi.sendPhoto(chatId, cached.image, lines.join("\n"));
+      if (r && r.ok) return;
+    }
+    return tgApi.sendMessage(chatId, lines.join("\n"));
+  }
+
+  // 🇨🇭 AS24: Volldetail + Bildergalerie.
+  const id = uid.split(":")[1];
+  await tgApi.sendMessage(chatId, "🔎 Hole das komplette Inserat …");
+  const d = await fetchListingDetail(id);
+  if (!d) {
+    const link = cached ? cached.url : "https://www.autoscout24.ch/de/d/" + id;
+    return tgApi.sendMessage(chatId,
+      "Konnte die Detaildaten gerade nicht laden (Inserat evtl. offline). [Hier öffnen](" + link + ").");
+  }
+  const caption = buildDetailCaption(d, cached);
+  const imgs = (d._images || []).slice(0, 10);
+  if (imgs.length >= 2) {
+    const media = imgs.map((u, i) => (i === 0
+      ? { type: "photo", media: u, caption, parse_mode: "Markdown" }
+      : { type: "photo", media: u }));
+    const r = await tgApi.sendMediaGroup(chatId, media);
+    if (!(r && r.ok)) await tgApi.sendMessage(chatId, caption); // Fallback ohne Bilder
+  } else if (imgs.length === 1) {
+    await tgApi.sendPhoto(chatId, imgs[0], caption);
+  } else {
+    await tgApi.sendMessage(chatId, caption);
+  }
+
+  // Voller Inserattext separat (plain — Sonderzeichen sollen Markdown nicht brechen).
+  const desc = (d.description || "").trim();
+  if (desc) {
+    const body = desc.length > 3800 ? desc.slice(0, 3800) + " …" : desc;
+    await tgApi.sendMessage(chatId, "📝 Inserattext:\n\n" + body, { parse_mode: undefined });
+  }
+}
+
+// ================= /edit: bestehende Suche bearbeiten =================
+const EDIT_FIELDS = [
+  ["💰 Max-Preis", "price"],
+  ["⚙ Mindest-PS", "hp"],
+  ["📅 Jahr ab", "year"],
+  ["⛽ Treibstoff", "fuel"],
+  ["🚙 Karosserie", "body"],
+];
+
+// Werte-Keyboard für ein editierbares Feld — callbacks tragen id+field+wert.
+function editValueKeyboard(id, field, source) {
+  let opts;
+  if (field === "price") opts = source === "kleinanzeigen" ? PRICE_EUR_OPTIONS : PRICE_OPTIONS;
+  else if (field === "hp") opts = HP_OPTIONS;
+  else if (field === "year") opts = YEAR_OPTIONS;
+  else if (field === "fuel") opts = FUEL_OPTIONS;
+  else if (field === "body") opts = BODY_OPTIONS;
+  else opts = [];
+  const btns = opts.map(([t, v]) => ({ text: t, data: "eset:" + id + ":" + field + ":" + v }));
+  const rows = chunk(btns, 3);
+  rows.push([{ text: "« Zurück", data: "ed:" + id }]);
+  return rows;
+}
+
+async function sendEditMenu(env, tgApi, chatId) {
+  const searches = orderedSearches(await getSearches(env));
+  if (!searches.length) {
+    return tgApi.sendMessage(chatId, "Keine Suchen zum Bearbeiten. /addcar legt eine an.");
+  }
+  const rows = searches.map((s) => [{ text: (s.paused ? "⏸ " : "") + searchLabel(s), data: "ed:" + s.id }]);
+  return tgApi.sendMessage(chatId, "✏️ *Welche Suche bearbeiten?* (tippen)", keyboard(rows));
+}
+
+// Feldmenü einer Suche (Max-Preis/PS/Jahr/… + Pause-Toggle + Löschen).
+async function showEditFields(env, tgApi, chatId, msgId, id) {
+  const s = (await getSearches(env)).find((x) => x.id === id);
+  if (!s) return tgApi.editMessageText(chatId, msgId, "Suche nicht mehr da. /edit neu starten.");
+  const rows = EDIT_FIELDS.map(([t, f]) => [{ text: t, data: "ef:" + id + ":" + f }]);
+  rows.push([{ text: s.paused ? "▶️ Fortsetzen" : "⏸ Pausieren", data: "epause:" + id }]);
+  rows.push([{ text: "🗑 Löschen", data: "d:" + id }, { text: "✓ Fertig", data: "eclose" }]);
+  const stateNote = s.paused ? "\n_(⏸ pausiert — meldet aktuell keine Treffer)_" : "";
+  return tgApi.editMessageText(chatId, msgId,
+    "✏️ *" + searchLabel(s) + "*" + stateNote + "\nWas möchtest du ändern?", keyboard(rows));
+}
+
+// ================= /stats: Übersicht (aus KV, ohne teure Live-Abfragen) =================
+async function sendStats(env, tgApi, chatId) {
+  const [searches, seen, prices, drops, favs, blockwords, hb] = await Promise.all([
+    getSearches(env), getSeen(env), getPrices(env), getPriceDrops(env),
+    getFavorites(env), getBlockwords(env), getHeartbeat(env),
+  ]);
+  const ch = searches.filter((s) => !s.source || s.source === "autoscout24");
+  const de2 = searches.filter((s) => s.source === "kleinanzeigen");
+  const paused = searches.filter((s) => s.paused);
+  const lines = ["📊 *BMW Deal Scanner — Übersicht*", ""];
+  lines.push("🔎 Suchen: *" + searches.length + "*  (" + ch.length + " 🇨🇭 · " + de2.length + " 🇩🇪)" +
+    (paused.length ? "  · " + paused.length + " ⏸ pausiert" : ""));
+  lines.push("👀 Beobachtete Inserate: *" + Object.keys(seen).length + "*");
+  lines.push("💶 Preise getrackt: *" + Object.keys(prices).length + "*  · 📉 Senkungen erfasst: *" + drops.length + "*");
+  lines.push("⭐ Favoriten: *" + favs.length + "*  · 🚫 Blockwörter: *" + blockwords.length + "*");
+  if (hb && hb.lastHit) {
+    const mins = Math.round((Date.now() - hb.lastHit) / 60000);
+    const span = mins < 60 ? mins + " Min" : Math.round(mins / 60) + " Std";
+    lines.push("🕐 Letzter neuer Treffer: vor " + span);
+  }
+  if (hb && hb.count) lines.push("😴 Leere Checks in Folge: *" + hb.count + "*");
+  if (searches.length) {
+    lines.push("", "*Aktive Suchen:*");
+    for (const s of orderedSearches(searches)) {
+      lines.push((s.paused ? "⏸ " : "• ") + searchLabel(s));
+    }
+  }
+  return tgApi.sendMessage(chatId, lines.join("\n"));
+}
+
+// ================= /preis: jüngste Preissenkungen =================
+async function sendPriceDrops(env, tgApi, chatId) {
+  const drops = await getPriceDrops(env);
+  if (!drops.length) {
+    return tgApi.sendMessage(chatId,
+      "📉 *Preissenkungen*\n\nNoch keine erfasst. Sobald bei einem beobachteten Inserat der Preis " +
+      "fällt, melde ich es automatisch — und hier siehst du dann die jüngsten Senkungen.");
+  }
+  await tgApi.sendMessage(chatId, "📉 *Jüngste Preissenkungen* (" + drops.length + ")");
+  let budget = 40;
+  for (const dr of drops.slice(0, 15)) {
+    if (budget < 2) { await tgApi.sendMessage(chatId, "(Rest mit /preis erneut abrufen.)"); break; }
+    budget--;
+    const isDe = dr.source === "kleinanzeigen" || dr.source === "mobile";
+    const cur = isDe ? "€ " : "CHF ";
+    const fmt = (n) => cur + Math.round(n).toLocaleString("de-CH").replace(/,/g, "'");
+    const pct = Math.round(((dr.old - dr.new) / dr.old) * 100);
+    const mins = Math.round((Date.now() - dr.ts) / 60000);
+    const ago = mins < 60 ? "vor " + mins + " Min" : (mins < 1440 ? "vor " + Math.round(mins / 60) + " Std" : "vor " + Math.round(mins / 1440) + " Tg");
+    const cap = [
+      (isDe ? "🇩🇪" : "🇨🇭") + " 📉 *−" + pct + "%*  ·  " + ago,
+      "*" + escapeMd(dr.title || "Inserat") + "*",
+      "~" + fmt(dr.old) + "~  →  💰 *" + fmt(dr.new) + "*",
+      "🔎 _" + (dr.searchLabel || "") + "_",
+      "[➜ Inserat ansehen](" + dr.url + ")  ·  ↩️ _/mehrinfo als Antwort_",
+    ].join("\n");
+    const kb = keyboard([[{ text: "⭐ Merken", data: "fav:" + dr.uid }]]);
+    if (dr.image) {
+      const r = await tgApi.sendPhoto(chatId, dr.image, cap, kb);
+      if (r && r.ok) continue;
+    }
+    await tgApi.sendMessage(chatId, cap, kb);
   }
 }

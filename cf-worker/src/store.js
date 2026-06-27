@@ -26,6 +26,17 @@ export async function removeSearch(env, id) {
   return kept;
 }
 
+// Eine Suche teilweise aktualisieren (für /edit). patch wird gemergt; gibt die
+// aktualisierte Suche zurück (oder null, wenn die id nicht existiert).
+export async function updateSearch(env, id, patch) {
+  const all = await getSearches(env);
+  const i = all.findIndex((s) => s.id === id);
+  if (i < 0) return null;
+  all[i] = { ...all[i], ...patch };
+  await saveSearches(env, all);
+  return all[i];
+}
+
 // --- seen dedup (one JSON object {uid: lastSeenTs}) ---
 export async function getSeen(env) {
   const raw = await env.BMW_KV.get(SEEN);
@@ -145,4 +156,48 @@ export async function getPending(env, chatId) {
 }
 export async function clearPending(env, chatId) {
   await env.BMW_KV.delete("pending:" + chatId);
+}
+
+// --- Heartbeat: nur EINE „kein neuer Treffer"-Statusmeldung gleichzeitig im Chat.
+//     Wir merken uns deren message_id, einen Zähler der leeren Checks in Folge
+//     und den Zeitpunkt des letzten echten Treffers — damit die eine Meldung
+//     hochzählen kann, statt den Chat zuzumüllen. ---
+const HEARTBEAT = "heartbeat";
+export async function getHeartbeat(env) {
+  const raw = await env.BMW_KV.get(HEARTBEAT);
+  return raw ? JSON.parse(raw) : { msgId: null, count: 0, since: null, lastHit: null };
+}
+export async function saveHeartbeat(env, hb) {
+  await env.BMW_KV.put(HEARTBEAT, JSON.stringify(hb));
+}
+
+// --- Preis-Historie pro Inserat: { uid: { p:price, t:lastTs } }. Der Scan
+//     vergleicht den aktuellen Preis mit dem gespeicherten; sinkt er, gibt's
+//     einen Preissenkungs-Alarm. Älter als 60 Tage wird geprunt. ---
+const PRICES = "prices";
+export async function getPrices(env) {
+  const raw = await env.BMW_KV.get(PRICES);
+  return raw ? JSON.parse(raw) : {};
+}
+export async function savePrices(env, prices) {
+  const cutoff = Date.now() - 60 * 24 * 3600 * 1000;
+  for (const k of Object.keys(prices)) {
+    if (!prices[k] || prices[k].t < cutoff) delete prices[k];
+  }
+  await env.BMW_KV.put(PRICES, JSON.stringify(prices));
+}
+
+// --- Liste der jüngsten Preissenkungen (für /preis), neueste zuerst, cap 40.
+//     Jeder Eintrag: { uid, title, url, image, old, new, ts, searchLabel, source }. ---
+const PRICEDROPS = "pricedrops";
+export async function getPriceDrops(env) {
+  const raw = await env.BMW_KV.get(PRICEDROPS);
+  return raw ? JSON.parse(raw) : [];
+}
+export async function addPriceDrop(env, drop) {
+  const all = await getPriceDrops(env);
+  all.unshift(drop);
+  const capped = all.slice(0, 40);
+  await env.BMW_KV.put(PRICEDROPS, JSON.stringify(capped));
+  return capped;
 }

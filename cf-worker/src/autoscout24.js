@@ -68,10 +68,19 @@ function toListing(item) {
   };
 }
 
+// AS24-Listing-IDs sind rein numerisch. Hart darauf festnageln, damit nichts
+// anderes (z. B. ein manipuliertes uid) in den API-Pfad gelangen kann.
+function safeListingId(id) {
+  const s = String(id);
+  return /^\d+$/.test(s) ? s : null;
+}
+
 // Full listing description (for keyword filtering on the ad text).
 export async function fetchDescription(id) {
+  const sid = safeListingId(id);
+  if (!sid) return "";
   try {
-    const r = await fetch("https://api.autoscout24.ch/v1/listings/" + id, { headers: HEADERS });
+    const r = await fetch("https://api.autoscout24.ch/v1/listings/" + sid, { headers: HEADERS });
     if (!r.ok) return "";
     const d = await r.json();
     return [d.description || "", d.teaser || ""].join(" ");
@@ -95,8 +104,10 @@ function allImageUrls(item) {
 // Vollständiges Inserat (für /mehrinfo). Liefert das rohe Detail-Objekt + alle
 // Bild-URLs. Null bei Fehler/Nicht-gefunden.
 export async function fetchListingDetail(id) {
+  const sid = safeListingId(id);
+  if (!sid) return null;
   try {
-    const r = await fetch("https://api.autoscout24.ch/v1/listings/" + id, { headers: HEADERS });
+    const r = await fetch("https://api.autoscout24.ch/v1/listings/" + sid, { headers: HEADERS });
     if (!r.ok) return null;
     const d = await r.json();
     d._images = allImageUrls(d);

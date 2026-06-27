@@ -39,9 +39,12 @@ Kein tägliches Durchklicken mehr. Du sagst einmal, was du suchst – der Bot ma
 - 🔎 **Multi-Börsen-Suche** – AutoScout24.ch, ricardo.ch, kleinanzeigen.de & mobile.de in einem Tool (Facebook Marketplace optional).
 - 🎯 **Punktgenaue Filter** – Marke, Modell, Preis, Jahr, Kilometer, **Hubraum**, **PS (bis ≥ 500)** und Treibstoff. Alles per Knopfdruck im Telegram-Bot, kein Tippen nötig.
 - 🔥 **Deal-Bewertung** – jedes CH-Inserat wird mit dem aktuellen Markt-Median verglichen: **🔥 TOP-DEAL** (≥ 25 % unter Median), **👍 Guter Deal** (≥ 15 %), **🆕 Neu**.
+- 📉 **Preissenkungs-Alarm** – der Scanner merkt sich jeden Preis. Fällt er später, bekommst du automatisch eine **„Preis gesenkt"-Karte** (alt → neu, −%). Übersicht mit `/preis`.
+- 📋 **Komplettes Inserat im Chat** – mit `/mehrinfo` *als Antwort* auf eine Karte holst du das **ganze** Inserat: Hubraum, Zylinder, Verbrauch, CO₂, Getriebe, Farben, Zustand, kompletter Text – **und alle Bilder als Galerie**. Kein Wechsel zur Plattform nötig.
 - 🔧 **Tuning-Radar für DE** – die deutschen Quellen werden auf getunte Autos gefiltert (~80 Keywords wie *Stage 2, Kompressor, JB4, Eisenmann* + PS-Schwelle).
 - 🚫 **Stichwort-Sperre** – Inserate mit „Motorschaden", „Bastler", „Export" & Co. fliegen automatisch raus.
-- 🔕 **Kein Spam** – gesehene Inserate werden gemerkt; gemeldet wird nur wirklich Neues. Der allererste Lauf einer Suche merkt sich still den Bestand.
+- 🔕 **Kein Spam** – gesehene Inserate werden gemerkt; gemeldet wird nur wirklich Neues. Der allererste Lauf einer Suche merkt sich still den Bestand. Die „nichts Neues"-Statusmeldung **räumt sich selbst auf** (immer nur eine, mit Zähler) – kein endloses Scrollen.
+- ✏️ **Suchen verwalten** – bestehende Suche per `/edit` anpassen (Preis/PS/Jahr/…) oder **pausieren/fortsetzen**, ohne sie zu löschen. `/stats` zeigt dir den Gesamtüberblick.
 - ⭐ **Favoriten** – jedes Auto per Knopfdruck merken und später mit `/favoriten` wieder aufrufen.
 - 🛡️ **Läuft konstant** – ein blockierter Anbieter bringt nie das ganze System zum Absturz; nach längerem Ausfall einer Quelle bekommst du *eine* dezente Telegram-Notiz statt Fehler-Spam.
 - ☁️ **24/7 & gratis** – kein eigener Server, kein Strom, kein PC, der laufen muss.
@@ -90,8 +93,8 @@ Drei Bausteine, die zusammenspielen – alle im Gratis-Kontingent:
    ┌───────────────────────────────────────────────────────────────┐
    │              ☁️  CLOUDFLARE WORKER  (das Gehirn)               │
    │  • Telegram-Bot (alle Befehle & Menüs)                        │
-   │  • AutoScout24-Scan per API  ·  Deal-Scoring  ·  Stichwortfilter │
-   │  • KV-Speicher: Suchen · gesehene Inserate · Favoriten        │
+   │  • AS24-Scan per API · Deal-Scoring · Preissenkung · Filter   │
+   │  • KV: Suchen · gesehen · Preise · Favoriten · Heartbeat      │
    │            Cron: alle 30 Min                                  │
    └───────────────▲───────────────────────────────┬──────────────┘
                    │  /searches (Suchen abholen)    │  Cache füllen
@@ -117,8 +120,12 @@ Drei Bausteine, die zusammenspielen – alle im Gratis-Kontingent:
 | `/kleinanzeigen` | 🇩🇪 Direkt eine kleinanzeigen.de-Suche (nur Tuning) anlegen |
 | `/mobile` | 🇩🇪 Heisse mobile.de-Inserate ansehen |
 | `/list` | Alle aktiven Suchen anzeigen |
+| `/edit` | ✏️ Bestehende Suche bearbeiten (Preis/PS/Jahr/Treibstoff/Karosserie) oder **pausieren / fortsetzen** |
 | `/deletecar` | Eine Suche löschen |
+| `/stats` | 📊 Übersicht & Status (Suchen, beobachtete Inserate, Senkungen, letzter Treffer) |
 | `/deals` | Beste Treffer aller 🇨🇭-Suchen |
+| `/preis` | 📉 Jüngste Preissenkungen |
+| `/mehrinfo` | 📋 **Als Antwort auf eine Inserat-Karte:** komplettes Inserat (alle Daten + alle Bilder) in den Chat |
 | `/zeig` | Eine Suche auswählen & Top-Treffer zeigen (auch `/zeig BMW 335`) |
 | `/ricardo` | Neueste ricardo-Treffer |
 | `/favoriten` | ⭐ Gemerkte Autos |
@@ -126,6 +133,8 @@ Drei Bausteine, die zusammenspielen – alle im Gratis-Kontingent:
 | `/scrape` | 🤖 Den Browser-Scraper sofort manuell starten (~2 Min) |
 | `/clear` | Chat aufräumen |
 | `/help` | Hilfe |
+
+> **💡 Tipp – `/mehrinfo`:** Antworte (Telegram-„Reply") auf eine beliebige Inserat-Karte mit `/mehrinfo`. Der Bot liest die Inserat-ID aus der Karte und holt dir bei 🇨🇭 AutoScout24 das **komplette** Inserat samt Bildergalerie direkt in den Chat. (🇩🇪-Inserate eingeschränkt – ohne Detail-API.)
 
 > Der Bot antwortet **ausschliesslich** auf deine eigene Chat-ID. Schreibt ein Fremder dem Bot, wird er ignoriert – auch wenn das Repo öffentlich ist.
 
@@ -221,11 +230,11 @@ Zusammen: **0 CHF/Monat**, 24/7, ohne eigenen Server.
 ```
 cf-worker/              ☁️ Cloudflare Worker – das Gehirn (empfohlen)
   src/index.js          Einstieg: Telegram-Webhook + 30-Min-Cron
-  src/bot.js            Alle Befehle, Menüs, /addcar-Flow
-  src/scan.js           AutoScout24-Scan, Deal-Scoring, Stichwortfilter
-  src/autoscout24.js    AutoScout24-API-Client
-  src/store.js          KV: Suchen · gesehen · Sperrwörter · Favoriten
-  src/telegram.js       Telegram-API-Helfer
+  src/bot.js            Alle Befehle & Menüs (/addcar, /edit, /stats, /preis, /mehrinfo …)
+  src/scan.js           AutoScout24-Scan, Deal-Scoring, Stichwortfilter, Preissenkung, Heartbeat
+  src/autoscout24.js    AutoScout24-API-Client (Suche · Detail · Bilder)
+  src/store.js          KV: Suchen · gesehen · Preise · Senkungen · Sperrwörter · Favoriten · Heartbeat
+  src/telegram.js       Telegram-API-Helfer (inkl. Bildergalerie)
   wrangler.toml         Worker-Konfig, Cron, KV-Binding
 
 browser-scraper/        🤖 GitHub-Actions-Scraper (Playwright)
